@@ -1,0 +1,300 @@
+#!/bin/env inex
+
+total_steps: 60000
+
+exp_dir: ???
+
+plugins:
+  - model
+  - pl_module
+  - parameters
+  - optimizer
+  - scheduler
+  - _set_optims
+  ## DATA
+  - dl_split_by_worker
+  - dl_tar_to_samples
+  - dl_decode
+  - dl_filter
+  ## TRAIN DATA
+  - train_tars_list
+  - dl_train_tars
+  - dl_train_elements_shuffle
+  - dl_train_batching
+  - dl_train_batch_shuffle
+    #- dl_train_limit
+  - dl_train_dataloader
+  ## VAL DATA
+  - val_tars_list
+  - dl_val_tars
+  - dl_val_batching
+  - dl_val_dataloader
+  ## DEBUG
+  ### TRAINING
+  ## pl trainer
+  - checkpoint
+  - on_ex_ckpt
+  - progress
+  - summary
+  - trainer
+    #- validation_zero_epoch
+
+
+############ MODEL ###########################
+model:
+  module: maa_yacup.models.transformer_pos/Transformer
+  exports:
+    - parameters
+  options:
+    input_dim: 10
+    cnn_kernel: 1
+    emb_dim: 256
+    ff_dim: 512
+    out_dim: 6
+    dropout: 0.1
+    num_layers: 6
+    nhead: 4
+    residual_w: 0.2
+    max_len: 3000
+
+
+################### PL MODULE #####################
+pl_module:
+  module: maa_yacup.module/CoordsPredictorAR
+  imports:
+    model: plugins.model
+  options:
+    debug_dir: ${exp_dir}/examples
+    DEBUG: False
+    pad_value: -1000000
+
+parameters:
+  module: plugins.model/parameters
+
+optimizer:
+  module: torch.optim/Adam
+  imports:
+    params: plugins.parameters
+  options:
+    lr: 1e-3
+    weight_decay: 0
+
+scheduler:
+  module: torch.optim.lr_scheduler/OneCycleLR
+  imports:
+    optimizer: plugins.optimizer
+  options:
+    max_lr: ${optimizer.options.lr}
+    total_steps: ${total_steps}
+
+_set_optims:
+  module: plugins.pl_module/set_optimizers_config
+  imports:
+    optimizers_config:  #plugins.optimizer
+      - [plugins.optimizer]
+      - [plugins.scheduler]
+
+
+
+
+################## DATALOADERS ###############
+#split_by_node:
+#  module: inex.helpers/attribute
+#  options:
+#    modname: webdataset
+#    attname: split_by_mode
+
+dl_split_by_worker:
+  module: inex.helpers/attribute
+  options:
+    modname: webdataset
+    attname: split_by_worker
+
+dl_tar_to_samples:
+  module: webdataset/tarfile_to_samples
+
+dl_decode:
+  module: webdataset/decode
+
+dl_filter:
+  module: maa_yacup.data.wds_filters/filter_keys
+  options:
+    keep:
+      - 'control_feats.pth'
+      - 'loc.pth'
+
+
+################## TRAIN DATALOADER ############
+train_tars_list:
+  module: glob/glob
+  options: 
+    pathname: 'exp_v1/YandexCup2024v2/YaCupTrain/dump-0000*.tar' # 1 - 99, val 100 - 104
+
+dl_train_tars:
+  module: webdataset/SimpleShardList
+  imports:
+    urls: plugins.train_tars_list
+
+# tars (/)
+# split by node / worker (/)
+# tarfile_to_samples
+
+dl_train_elements_shuffle:
+  module: webdataset/shuffle
+  bufsize: 200
+  initial: 20
+  seed: 42
+# shuffle
+# decode
+
+dl_train_batching:
+  module: maa_yacup.data.wds_batching/batching_constant_batch_size
+  options:
+    batch_size: 12
+    collate_fn_kwargs: 
+      pad_value: ${pl_module.options.pad_value}
+# batching
+
+dl_train_batch_shuffle: 
+  module: webdataset/shuffle
+  options:
+    bufsize: 10
+    initial: 5
+    seed: 42
+# shuffle
+
+dl_train_limit:
+  module: maa_yacup.data.wds_filters/limit_total_steps
+  options: 
+    thread_limit: ${total_steps}
+    num_threads: ${dl_train_dataloader.options.num_workers}
+
+dl_train_dataloader:
+  module: maa_yacup.data.wds_dataloaders/build_dataloder
+  imports:
+    datapipeline:
+      - plugins.dl_train_tars
+      - plugins.dl_split_by_worker
+      - plugins.dl_tar_to_samples
+      - plugins.dl_filter
+      - plugins.dl_train_elements_shuffle
+      - plugins.dl_decode
+      - plugins.dl_train_batching
+      - plugins.dl_train_batch_shuffle
+        #      - plugins.dl_train_limit
+  options:
+      num_workers: 8
+      pin_memory: True
+      batch_size: null
+      sampler: null
+
+
+################## VAL DATALOADER ############
+val_tars_list:
+  module: glob/glob
+  options: 
+    pathname: 'exp_v1/YandexCup2024v2/YaCupTrain/dump-0001*.tar'
+
+dl_val_tars:
+  module: webdataset/SimpleShardList
+  imports:
+    urls: plugins.val_tars_list
+# tars (/)
+# split by node / worker (/)
+# tarfile_to_samples
+# decode
+
+dl_val_batching:
+  module: maa_yacup.data.wds_batching/batching_constant_batch_size
+  options:
+    batch_size: 48
+    collate_fn_kwargs: 
+      pad_value: ${pl_module.options.pad_value}
+# batching
+
+dl_val_dataloader:
+  module: maa_yacup.data.wds_dataloaders/build_dataloder
+  imports:
+    datapipeline:
+      - plugins.dl_val_tars
+      - plugins.dl_split_by_worker
+      - plugins.dl_tar_to_samples
+      - plugins.dl_filter
+      - plugins.dl_decode
+      - plugins.dl_val_batching
+  options:
+      num_workers: 6
+      pin_memory: True
+      batch_size: null
+      sampler: null
+
+
+#execute:
+#  method: inex.helpers/show
+#  imports:
+
+checkpoint:
+  module: pytorch_lightning.callbacks/ModelCheckpoint
+  options:
+    dirpath: ${exp_dir}/
+    every_n_train_steps: 500
+    save_last: True
+    verbose: True
+
+on_ex_ckpt:
+  module: pytorch_lightning.callbacks/OnExceptionCheckpoint
+  options:
+    dirpath: ${exp_dir}/
+
+progress:
+  module: pytorch_lightning.callbacks.progress/TQDMProgressBar
+  #module: pytorch_lightning.callbacks.progress/ProgressBar
+  options:
+    refresh_rate: 10
+
+summary:
+  module: pytorch_lightning.callbacks/ModelSummary
+
+#logger:
+#  module: pytorch_lightning.loggers/CSVLogger
+#  options:
+#    save_dir: ${exp_dir}
+
+#, plugins.checkpoint
+
+trainer:
+  module: pytorch_lightning/Trainer
+  imports:
+    callbacks: [plugins.progress, plugins.summary, plugins.on_ex_ckpt, plugins.checkpoint ] #plugins.logger]
+  options:
+    accelerator: gpu
+    #strategy: ddp
+    #devices: 1  # batch_size == devices * num_nodes * batch_size
+    #num_nodes: 1
+    default_root_dir: ${exp_dir}
+    max_epochs: 20
+    #limit_train_batches: ${total_steps}
+    #    val_check_interval: 10000
+    #precision: "bf16-mixed"
+    deterministic: False
+    use_distributed_sampler: False
+    # accumulate_grad_batches: 2
+    #gradient_clip_val: 0.5
+  exports: [fit]
+
+validation_zero_epoch:
+  module: plugins.trainer/validate
+  imports:
+    model: plugins.pl_module
+    dataloaders: plugins.dl_val_dataloader
+
+execute:
+  method: plugins.trainer/fit
+  imports:
+    model: plugins.pl_module
+    train_dataloaders: plugins.dl_train_dataloader
+   #    train_dataloaders: plugins.dl_val_dataloader
+    val_dataloaders: plugins.dl_val_dataloader
+#  options:
+#    ckpt_path: last
+#    ckpt_path: exp/train_tse_22/epoch=3-step=7500_val34.7.ckpt
