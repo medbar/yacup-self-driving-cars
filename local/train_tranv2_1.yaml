@@ -1,6 +1,6 @@
-#!/bin/env inex
+#validate=local/validate_8.yaml
 
-total_steps: 60000
+total_steps: 200000
 
 exp_dir: ???
 
@@ -16,6 +16,7 @@ plugins:
   - dl_tar_to_samples
   - dl_decode
   - dl_filter
+  - dl_select_loc
   ## TRAIN DATA
   - train_tars_list
   - dl_train_tars
@@ -42,18 +43,19 @@ plugins:
 
 ############ MODEL ###########################
 model:
-  module: maa_yacup.models.transformer_pos/Transformer
+  module: maa_yacup.models.transformer_pos_v2/Transformer
   exports:
     - parameters
   options:
-    input_dim: 10
-    cnn_kernel: 3
-    emb_dim: 256
-    ff_dim: 512
-    out_dim: 6
+    loc_dim: 3
+    control_dim: 4
+    cnn_kernel: 30
+    emb_dim: 512
+    ff_dim: 1024
+    out_dim: ${model.options.loc_dim}
     dropout: 0.1
     num_layers: 6
-    nhead: 4
+    nhead: 8
     residual_w: 0.2
     max_len: 3000
 
@@ -123,6 +125,8 @@ dl_filter:
       - 'control_feats.pth'
       - 'loc.pth'
 
+dl_select_loc:
+  module: maa_yacup.data.wds_filters/select_loc_columns
 
 ################## TRAIN DATALOADER ############
 train_tars_list:
@@ -179,6 +183,7 @@ dl_train_dataloader:
       - plugins.dl_filter
       - plugins.dl_train_elements_shuffle
       - plugins.dl_decode
+      - plugins.dl_select_loc
       - plugins.dl_train_batching
       - plugins.dl_train_batch_shuffle
         #      - plugins.dl_train_limit
@@ -221,6 +226,7 @@ dl_val_dataloader:
       - plugins.dl_tar_to_samples
       - plugins.dl_filter
       - plugins.dl_decode
+      - plugins.dl_select_loc
       - plugins.dl_val_batching
   options:
       num_workers: 6
@@ -272,7 +278,7 @@ trainer:
     #devices: 1  # batch_size == devices * num_nodes * batch_size
     #num_nodes: 1
     default_root_dir: ${exp_dir}
-    max_epochs: 20
+    max_epochs: 60
     #limit_train_batches: ${total_steps}
     #    val_check_interval: 10000
     #precision: "bf16-mixed"

@@ -33,18 +33,22 @@ class CoordsPredictorAR(LightningModule):
         debug_dir=None,
         DEBUG=False,
         pad_value=-1000000,
+        max_weight=100,
+        subzero=True
     ):
         super().__init__()
         self.DEBUG = DEBUG
         self.model = model
         if criterion is None:
-            criterion = torch.nn.MSELoss()
+            criterion = torch.nn.MSELoss(reduction="none")
 
         self.criterion = criterion
         self.debug_dir = debug_dir
         self.validation_step_outputs = []
         self.optimizers_config = optimizers_config
         self.pad_value = pad_value
+        self.max_weight = max_weight
+        self.subzero=True
 
     def set_optimizers_config(self, optimizers_config):
         self.optimizers_config = optimizers_config
@@ -62,23 +66,27 @@ class CoordsPredictorAR(LightningModule):
         }
         """
 
+        control_feats = batch["control_feats.pth"]
         mask = (batch["loc.pth"] != self.pad_value).any(dim=-1)
-        attention_mask = (batch["control_feats.pth"] != self.pad_value).any(
-            dim=-1
-        ) & mask
+        attention_mask = (control_feats != self.pad_value).any(dim=-1) & mask
         # mask = torch.nn.functional.pad(mask[:, 1:], (0, 1), value=False)
         # the first frame as a zero point
-        zero_point = batch["loc.pth"][:, 0]
+        if self.subzero:
+            zero_point = batch["loc.pth"][:, 0]
+        else:
+            zero_point = batch["loc.pth"].new_zeros((batch["loc.pth"].shape[0], 1, batch["loc.pth"][2]))
         assert (zero_point > self.pad_value).all(), f"{zero_point=}, {self.pad_value}"
         loc = batch["loc.pth"] - zero_point[:, None, :]
         # labels = torch.nn.functional.pad(
         #    loc[:, 1:], (0, 0, 0, 1), value=self.pad_value
         # )
-        #inputs_embeds = torch.concatenate([loc, batch["control_feats.pth"]], dim=-1)
-        #inputs_embeds = inputs_embeds * attention_mask[:, :, None]
-        outputs = self.model(loc=loc,
-                             control_feats=batch["control_feats.pth"],
-                             attention_mask=attention_mask)
+        # inputs_embeds = torch.concatenate([loc, batch["control_feats.pth"]], dim=-1)
+        # inputs_embeds = inputs_embeds * attention_mask[:, :, None]
+        outputs = self.model(
+            loc=loc,
+            control_feats=control_feats,
+            attention_mask=attention_mask,
+        )
         # logging.debug(f"{outputs['logits.pth'].shape=}, {outputs['embs.pth'].shape=}")
         outputs["loc.pth"] = outputs["logits.pth"] + zero_point[:, None, :]
         step = self.model.step()
@@ -86,11 +94,34 @@ class CoordsPredictorAR(LightningModule):
         outputs["num.pth"] = mask.sum()
         logits_w_mask = outputs["logits.pth"][:, :-step][mask]
         labels_w_mask = loc[:, step:][mask]
-        loss = self.criterion(logits_w_mask, labels_w_mask)
+        if loc.shape[1] > 500:
+            weights_decreasing = (
+                torch.arange(250, dtype=loc.dtype, device=loc.device)
+                / 250
+                * self.max_weight
+            )
+            weights = torch.concatenate(
+                [
+                    weights_decreasing,
+                    loc.new_full(
+                        (loc.shape[1] - weights_decreasing.shape[0] * 2,),
+                        self.max_weight,
+                    ),
+                    torch.flip(weights_decreasing, (0,)),
+                ]
+            )
+            weights_w_mask = weights[: outputs["logits.pth"].shape[1] - step].repeat(
+                loc.shape[0], 1
+            )[mask]
+            loss = (
+                self.criterion(logits_w_mask, labels_w_mask) * weights_w_mask[:, None]
+            ).mean()
+        else:
+            loss = self.criterion(logits_w_mask, labels_w_mask).mean() * self.max_weight
         outputs["loss.pth"] = loss
-        logging.debug(
-            f"{loss=}, {outputs['num.pth']=}, {logits_w_mask[-6:]=}, {labels_w_mask[-6:]=}"
-        )
+        # logging.debug(
+        #    f"{loss=}, {outputs['num.pth']=}, {logits_w_mask[-6:]=}, {labels_w_mask[-6:]=}"
+        # )
         # DEBUG
         if self.DEBUG:
             torch.save(
@@ -98,8 +129,8 @@ class CoordsPredictorAR(LightningModule):
                     "batch": batch,
                     "attention_mask": attention_mask,
                     "mask": mask,
-                    "inputs_embeds": inputs_embeds,
                     "labels_w_mask": labels_w_mask,
+                    "weights": weights,
                     "outputs": outputs,
                     "mask": mask,
                     "logits_w_mask": logits_w_mask,
@@ -110,7 +141,7 @@ class CoordsPredictorAR(LightningModule):
         return outputs
 
     def training_step(self, batch, batch_idx):
-        logging.debug(f"Process {batch_idx}, {batch['loc.pth'].shape=}")
+        # logging.debug(f"Process {batch_idx}, {batch['loc.pth'].shape=}")
         outputs = self.forward(batch)
         loss = outputs["loss.pth"]
         self.log(
@@ -121,7 +152,7 @@ class CoordsPredictorAR(LightningModule):
             on_epoch=False,
             batch_size=outputs["num.pth"],
         )
-        logging.debug(f"loss_train for {batch_idx} is {loss.item()}")
+        # logging.debug(f"loss_train for {batch_idx} is {loss.item()}")
         return {
             "loss": loss,
         }
@@ -130,26 +161,62 @@ class CoordsPredictorAR(LightningModule):
     @torch.inference_mode()
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         # logging.debug(f"valid started for {batch_idx}")
-        outputs = self.forward(batch)
+        # outputs = self.forward(batch)
+        start_frame = 250
+        orig_loc = batch["loc.pth"]
+        start_loc = orig_loc[:, :start_frame]
+        assert start_loc.shape[1] == start_frame, f"{orig_loc.shape=}"
+        assert (
+            start_loc[:, -1] != self.pad_value
+        ).all(), f"{start_frame=}, {batch['__key__']=}, {start_loc[:, -1]=}"
+        control_feats = batch["control_feats.pth"]
+        out = self.predict_step(
+            {
+                "loc.pth": start_loc,
+                "control_feats.pth": control_feats,
+            }
+        )
+        mask = (orig_loc != self.pad_value).any(dim=-1)
+        step = self.model.step()
+        mask = mask[:, step:]
+        loc_w_mask = out["loc.pth"][:, :-step][mask]
+        labels_w_mask = orig_loc[:, step:][mask]
+        mse_loss = torch.nn.functional.mse_loss(loc_w_mask, labels_w_mask)
+
         self.log(
-            "loss_valid",
-            outputs["loss.pth"],
+            "mse_valid_gen",
+            mse_loss,
             prog_bar=True,
             on_step=False,
             on_epoch=True,
             sync_dist=True,
-            batch_size=outputs["num.pth"],
+            batch_size=mask.sum(),
         )
+
+        #cum_loss = torch.nn.functional.mse_loss(out["loc.pth"][:, :end_frame-step].cumsum(dim=1)[mask],
+        #                                    orig_loc[:, step:].cumsum(dim=1)[mask])
+        #self.log(
+        #    "cum_valid_gen",
+        #    cum_loss,
+        #    prog_bar=True,
+        #    on_step=False,
+        #    on_epoch=True,
+        #    sync_dist=True,
+        #    batch_size=mask.sum(),
+        #)
+
+
         if self.debug_dir is not None:
             # remove last symbol, because  rprompt applied as a first item in labels in the forward
             # removes the last because the rprompt[-1] is used as the first element in labels in the forward
-            preds = outputs["loc.pth"]
+            preds = out["loc.pth"]
             self.validation_step_outputs.append(
                 (
                     batch_idx,
-                    batch["loc.pth"].cpu(),
+                    orig_loc.cpu(),
                     preds.cpu(),
-                    outputs["loss.pth"].cpu().item(),
+                    mse_loss.cpu().item()
+                    #(mse_loss.cpu().item(), cum_loss.cpu().item()),
                 )
             )
 
@@ -191,14 +258,14 @@ class CoordsPredictorAR(LightningModule):
         logging.info(f"Start from {T} and generate untill {maxT}")
         for i in range(T, maxT, step):
             assert loc.shape[1] == i, f"{loc.shape}, {maxT=}, {step=}, {i=}"
-            pred_out = self.forward({"loc.pth": loc, "control_feats.pth": control[:, :i]})
+            pred_out = self.forward(
+                {"loc.pth": loc, "control_feats.pth": control[:, :i]}
+            )
             losses.append(pred_out["loss.pth"])
             next_frames = pred_out["loc.pth"][:, -step:, :]
             loc = torch.concatenate([loc, next_frames], dim=1)
-            #logging.debug(f"{loc.shape=} {control.shape=}, {losses=}, {next_frames=}")
-        return {'loc.pth': loc,
-                'losses.pth': losses
-                }
+            # logging.debug(f"{loc.shape=} {control.shape=}, {losses=}, {next_frames=}")
+        return {"loc.pth": loc, "losses.pth": losses}
 
     def inplace_load_from_checkpoint(self, ckpt_path):
         data = torch.load(ckpt_path, map_location="cpu")["state_dict"]

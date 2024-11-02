@@ -46,7 +46,8 @@ model:
   exports:
     - parameters
   options:
-    input_dim: 10
+    loc_dim: 6
+    control_dim: 4
     cnn_kernel: 3
     emb_dim: 256
     ff_dim: 512

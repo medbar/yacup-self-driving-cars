@@ -1,0 +1,110 @@
+#!/bin/env inex
+
+exp_dir: ???
+
+plugins:
+  - pl_module
+  - _inplace_load
+  ## DATA
+  - dl_split_by_worker
+  - dl_tar_to_samples
+  - dl_decode
+  - dl_filter
+  ## VAL DATA
+  - val_tars_list
+  - dl_val_tars
+  - dl_val_batching
+  - dl_val_dataloader
+  ## DEBUG
+
+############ MODEL ###########################
+
+pl_module:                         
+  module:  inex.helpers/_import_        
+  exports:
+    - inplace_load_from_checkpoint
+  options:                              
+    plugin: pl_module              
+    config: ${exp_dir}/final_config.yaml
+
+_inplace_load:
+  module: plugins.pl_module/inplace_load_from_checkpoint
+  options:
+    ckpt_path: ${exp_dir}/last.ckpt
+
+
+################## DATALOADERS ###############
+#split_by_node:
+#  module: inex.helpers/attribute
+#  options:
+#    modname: webdataset
+#    attname: split_by_mode
+
+dl_split_by_worker:
+  module: inex.helpers/attribute
+  options:
+    modname: webdataset
+    attname: split_by_worker
+
+dl_tar_to_samples:
+  module: webdataset/tarfile_to_samples
+
+dl_decode:
+  module: webdataset/decode
+
+dl_filter:
+  module: maa_yacup.data.wds_filters/filter_keys
+  options:
+    keep:
+      - 'control_feats.pth'
+      - 'loc.pth'
+
+
+################## VAL DATALOADER ############
+val_tars_list:
+  module: glob/glob
+  options: 
+    pathname: 'exp_v1/YandexCup2024v2/YaCupTrain/dump-0001*.tar'
+
+dl_val_tars:
+  module: webdataset/SimpleShardList
+  imports:
+    urls: plugins.val_tars_list
+# tars (/)
+# split by node / worker (/)
+# tarfile_to_samples
+# decode
+
+dl_val_batching:
+  module: maa_yacup.data.wds_batching/batching_constant_batch_size
+  options:
+    batch_size: 1
+    collate_fn_kwargs: 
+      pad_value: -1000000
+# batching
+
+dl_val_dataloader:
+  module: maa_yacup.data.wds_dataloaders/build_dataloder
+  imports:
+    datapipeline:
+      - plugins.dl_val_tars
+      - plugins.dl_split_by_worker
+      - plugins.dl_tar_to_samples
+      - plugins.dl_filter
+      - plugins.dl_decode
+      - plugins.dl_val_batching
+  options:
+      num_workers: 6
+      pin_memory: True
+      batch_size: null
+      sampler: null
+
+
+execute:
+  method: maa_yacup.validate/predict_and_validate
+  imports:
+    module: plugins.pl_module
+    dl: plugins.dl_val_dataloader
+  options:
+    device: cpu
+    out_f: ${exp_dir}/predict2.txt

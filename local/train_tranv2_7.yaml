@@ -1,6 +1,6 @@
-#!/bin/env inex
+#validate=local/validate_8.yaml
 
-total_steps: 60000
+total_steps: 21000 #7620
 
 exp_dir: ???
 
@@ -16,6 +16,8 @@ plugins:
   - dl_tar_to_samples
   - dl_decode
   - dl_filter
+  - dl_select_loc
+  - dl_chunking
   ## TRAIN DATA
   - train_tars_list
   - dl_train_tars
@@ -33,34 +35,36 @@ plugins:
   ### TRAINING
   ## pl trainer
   - checkpoint
-  - on_ex_ckpt
+    #- on_ex_ckpt
   - progress
   - summary
+  - lrmonitor
   - trainer
     #- validation_zero_epoch
 
 
 ############ MODEL ###########################
 model:
-  module: maa_yacup.models.transformer_pos/Transformer
+  module: maa_yacup.models.transformer_pos_v2/Transformer
   exports:
     - parameters
   options:
-    input_dim: 10
-    cnn_kernel: 3
-    emb_dim: 256
-    ff_dim: 512
-    out_dim: 6
+    loc_dim: 3
+    control_dim: 4
+    cnn_kernel: 10
+    emb_dim: 512
+    ff_dim: 1024
+    out_dim: ${model.options.loc_dim}
     dropout: 0.1
     num_layers: 6
-    nhead: 4
+    nhead: 8
     residual_w: 0.2
-    max_len: 3000
+    max_len: 1001
 
 
 ################### PL MODULE #####################
 pl_module:
-  module: maa_yacup.module/CoordsPredictorAR
+  module: maa_yacup.module_v3/CoordsPredictorAR
   imports:
     model: plugins.model
   options:
@@ -123,6 +127,15 @@ dl_filter:
       - 'control_feats.pth'
       - 'loc.pth'
 
+dl_select_loc:
+  module: maa_yacup.data.wds_filters/select_loc_columns
+
+dl_chunking:
+  module: maa_yacup.data.wds_filters/chunking
+  options:
+    chunk_len: 1001
+    shift: 250
+
 
 ################## TRAIN DATALOADER ############
 train_tars_list:
@@ -142,7 +155,7 @@ dl_train_tars:
 dl_train_elements_shuffle:
   module: webdataset/shuffle
   bufsize: 200
-  initial: 20
+  initial: 80
   seed: 42
 # shuffle
 # decode
@@ -150,7 +163,7 @@ dl_train_elements_shuffle:
 dl_train_batching:
   module: maa_yacup.data.wds_batching/batching_constant_batch_size
   options:
-    batch_size: 12
+    batch_size: 256
     collate_fn_kwargs: 
       pad_value: ${pl_module.options.pad_value}
 # batching
@@ -158,8 +171,8 @@ dl_train_batching:
 dl_train_batch_shuffle: 
   module: webdataset/shuffle
   options:
-    bufsize: 10
-    initial: 5
+    bufsize: 20
+    initial: 10
     seed: 42
 # shuffle
 
@@ -177,8 +190,10 @@ dl_train_dataloader:
       - plugins.dl_split_by_worker
       - plugins.dl_tar_to_samples
       - plugins.dl_filter
-      - plugins.dl_train_elements_shuffle
       - plugins.dl_decode
+      - plugins.dl_select_loc
+      - plugins.dl_chunking
+      - plugins.dl_train_elements_shuffle
       - plugins.dl_train_batching
       - plugins.dl_train_batch_shuffle
         #      - plugins.dl_train_limit
@@ -207,7 +222,7 @@ dl_val_tars:
 dl_val_batching:
   module: maa_yacup.data.wds_batching/batching_constant_batch_size
   options:
-    batch_size: 48
+    batch_size: ${dl_train_batching.options.batch_size}
     collate_fn_kwargs: 
       pad_value: ${pl_module.options.pad_value}
 # batching
@@ -221,13 +236,14 @@ dl_val_dataloader:
       - plugins.dl_tar_to_samples
       - plugins.dl_filter
       - plugins.dl_decode
+      - plugins.dl_select_loc
+      - plugins.dl_chunking
       - plugins.dl_val_batching
   options:
       num_workers: 6
       pin_memory: True
       batch_size: null
       sampler: null
-
 
 #execute:
 #  method: inex.helpers/show
@@ -255,6 +271,10 @@ progress:
 summary:
   module: pytorch_lightning.callbacks/ModelSummary
 
+lrmonitor:                                               
+  module: pytorch_lightning.callbacks/LearningRateMonitor
+
+
 #logger:
 #  module: pytorch_lightning.loggers/CSVLogger
 #  options:
@@ -265,14 +285,14 @@ summary:
 trainer:
   module: pytorch_lightning/Trainer
   imports:
-    callbacks: [plugins.progress, plugins.summary, plugins.on_ex_ckpt, plugins.checkpoint ] #plugins.logger]
+    callbacks: [plugins.progress, plugins.summary, plugins.checkpoint, plugins.lrmonitor ] #plugins.logger] plugins.on_ex_ckpt, 
   options:
     accelerator: gpu
     #strategy: ddp
     #devices: 1  # batch_size == devices * num_nodes * batch_size
     #num_nodes: 1
     default_root_dir: ${exp_dir}
-    max_epochs: 20
+    max_epochs: 40
     #limit_train_batches: ${total_steps}
     #    val_check_interval: 10000
     #precision: "bf16-mixed"

@@ -1,0 +1,146 @@
+#!/bin/env inex
+
+exp_dir: exp/local/train_tranv2_5
+
+plugins:
+  - pl_module
+  - _inplace_load
+  ## DATA
+  - dl_split_by_worker
+  - dl_tar_to_samples
+  - dl_decode
+  - dl_prepare_feats
+  - dl_filter
+  - dl_select_loc
+  ## VAL DATA
+  - test_tars_list
+  - dl_test_tars
+  - dl_test_batching
+  - dl_test_dataloader
+  - dpl_predictor
+  - dpl_unbatch
+  - dpl_save_submit
+  ## DEBUG
+
+############ MODEL ###########################
+
+pl_module:                         
+  module:  inex.helpers/_import_        
+  exports:
+    - inplace_load_from_checkpoint
+  options:                              
+    plugin: pl_module              
+    config: ${exp_dir}/final_config.yaml
+
+_inplace_load:
+  module: plugins.pl_module/inplace_load_from_checkpoint
+  options:
+    ckpt_path: ${exp_dir}/last.ckpt
+
+
+################## DATALOADERS ###############
+#split_by_node:
+#  module: inex.helpers/attribute
+#  options:
+#    modname: webdataset
+#    attname: split_by_mode
+
+dl_split_by_worker:
+  module: inex.helpers/attribute
+  options:
+    modname: webdataset
+    attname: split_by_worker
+
+dl_tar_to_samples:
+  module: webdataset/tarfile_to_samples
+
+dl_decode:
+  module: webdataset/decode
+
+dl_prepare_feats:
+  module: maa_yacup.data.wds_filters/prepare_input_feats_v1
+
+dl_filter:
+  module: maa_yacup.data.wds_filters/filter_keys
+  options:
+    keep:
+      - 'control_feats.pth'
+      - 'loc.pth'
+      - 'req_stamps.pth'
+      - 'start_ns.id'
+
+dl_select_loc:
+  module: maa_yacup.data.wds_filters/select_loc_columns
+
+################## VAL DATALOADER ############
+test_tars_list:
+  module: glob/glob
+  options: 
+    pathname: 'exp_v2/YandexCup2024v2/YaCupTest/dump-*'
+
+dl_test_tars:
+  module: webdataset/SimpleShardList
+  imports:
+    urls: plugins.test_tars_list
+# tars (/)
+# split by node / worker (/)
+# tarfile_to_samples
+# decode
+
+dl_test_batching:
+  module: maa_yacup.data.wds_batching/batching_constant_batch_size
+  options:
+    batch_size: 256 #1
+    collate_fn_kwargs: 
+      pad_value: -1000000
+# batching
+
+dl_test_dataloader:
+  module: maa_yacup.data.wds_dataloaders/build_dataloder
+  imports:
+    datapipeline:
+      - plugins.dl_test_tars
+      - plugins.dl_split_by_worker
+      - plugins.dl_tar_to_samples
+      - plugins.dl_decode
+      - plugins.dl_prepare_feats
+      - plugins.dl_filter
+      - plugins.dl_select_loc
+      - plugins.dl_test_batching
+  options:
+      num_workers: 6
+      pin_memory: True
+      batch_size: null
+      sampler: null
+
+
+dpl_predictor:
+  module: maa_yacup.wds_predict/predict
+  imports:
+    module: plugins.pl_module
+  options:
+    device: cuda #cpu
+    limit: -1
+    start_frame: 245 #null #250
+    end_frame: 1010
+
+dpl_unbatch:
+  module: maa_yacup.data.wds_batching/unbatch
+  options:
+    pad_value: ${dl_test_batching.options.collate_fn_kwargs.pad_value}
+
+dpl_save_submit:
+  module: maa_yacup.data.wds_filters/save_submit
+  options:
+    outd: ${exp_dir}
+    loc_key: "predicted.pth"
+    frame_step: 20000000
+
+execute:
+  method: maa_yacup.data.wds_pipelines/run
+  imports:
+    pipeline: 
+      - plugins.dl_test_dataloader
+      - plugins.dpl_predictor
+      - plugins.dpl_unbatch
+      - plugins.dpl_save_submit

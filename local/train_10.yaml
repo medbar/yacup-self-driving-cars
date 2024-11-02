@@ -1,12 +1,13 @@
 #!/bin/env inex
 
-total_steps: 60000
+total_steps: 7620 # 3760
 
 exp_dir: ???
 
 plugins:
   - model
   - pl_module
+  - _inplace_load
   - parameters
   - optimizer
   - scheduler
@@ -46,27 +47,34 @@ model:
   exports:
     - parameters
   options:
-    input_dim: 10
-    cnn_kernel: 3
-    emb_dim: 256
-    ff_dim: 512
+    loc_dim: 6
+    control_dim: 4
+    cnn_kernel: 30
+    emb_dim: 512
+    ff_dim: 1024
     out_dim: 6
     dropout: 0.1
     num_layers: 6
-    nhead: 4
+    nhead: 8
     residual_w: 0.2
     max_len: 3000
 
 
 ################### PL MODULE #####################
 pl_module:
-  module: maa_yacup.module/CoordsPredictorAR
+  module: maa_yacup.module_v2/CoordsPredictorAR
   imports:
     model: plugins.model
   options:
     debug_dir: ${exp_dir}/examples
     DEBUG: False
     pad_value: -1000000
+    distortion_factor: 0.001
+
+_inplace_load:                                          
+  module: plugins.pl_module/inplace_load_from_checkpoint
+  options:                                              
+    ckpt_path: exp/local/train_5.4.2/epoch=119-step=75000.ckpt
 
 parameters:
   module: plugins.model/parameters
@@ -150,7 +158,7 @@ dl_train_elements_shuffle:
 dl_train_batching:
   module: maa_yacup.data.wds_batching/batching_constant_batch_size
   options:
-    batch_size: 12
+    batch_size: 64
     collate_fn_kwargs: 
       pad_value: ${pl_module.options.pad_value}
 # batching
@@ -272,7 +280,7 @@ trainer:
     #devices: 1  # batch_size == devices * num_nodes * batch_size
     #num_nodes: 1
     default_root_dir: ${exp_dir}
-    max_epochs: 20
+    max_epochs: 120
     #limit_train_batches: ${total_steps}
     #    val_check_interval: 10000
     #precision: "bf16-mixed"

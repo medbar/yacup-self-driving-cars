@@ -48,7 +48,7 @@ class Transformer(nn.Module):
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim // 2),
-            nn.SiLU()
+            nn.SiLU(),
         )
         self.control_proj = nn.Sequential(
             nn.Linear(control_dim * cnn_kernel, emb_dim),
@@ -56,8 +56,7 @@ class Transformer(nn.Module):
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim // 2),
-            nn.SiLU()
-
+            nn.SiLU(),
         )
         self.pos_emb = nn.Embedding(max_len // cnn_kernel + 1, emb_dim)
         transformer_layer = nn.TransformerEncoderLayer(
@@ -74,7 +73,7 @@ class Transformer(nn.Module):
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
-            nn.Linear(emb_dim, out_dim * cnn_kernel)
+            nn.Linear(emb_dim, out_dim * cnn_kernel),
         )
 
     def forward(self, loc, control_feats, attention_mask=None):
@@ -100,9 +99,13 @@ class Transformer(nn.Module):
         control_feats = torch.nn.functional.pad(
             control_feats, (0, 0, pad_left, control_right_pad), value=0
         )[:, : loc.shape[1] + self.cnn_kernel]
-
+        loc = loc.view(B, -1, self.cnn_kernel, F)
+        # последняя точка каждого фрейма - это точка отсчета для следующего фрейма
+        anchor_locs = loc[:, :, -1:, :]
         loc_embs = self.loc_proj(loc.view(B, -1, F * self.cnn_kernel))
-        control_embs = self.control_proj(control_feats.view(B, -1, control_feats.shape[-1] * self.cnn_kernel))
+        control_embs = self.control_proj(
+            control_feats.view(B, -1, control_feats.shape[-1] * self.cnn_kernel)
+        )
         embs = torch.concatenate(
             [(loc_embs + control_embs[:, :-1]), control_embs[:, 1:]], dim=2
         )
@@ -118,7 +121,9 @@ class Transformer(nn.Module):
             is_causal=True,
         )
         embs = embs * self.residual_w + embs_after_t
-        logits = self.head(embs).view(B, -1, self.out_dim)[:, pad_left:, :]
+        logits_delta = self.head(embs).view(B, -1, self.cnn_kernel, self.out_dim)
+        logits = logits_delta + anchor_locs
+        logits = logits.view(B, -1, self.out_dim)[:, pad_left:, :]
         assert logits.shape == (
             B,
             T,
@@ -126,6 +131,7 @@ class Transformer(nn.Module):
         ), f"{logits.shape=}, {B=}, {T=}, {sT=}, {self.out_dim=}"
         return {
             "logits.pth": logits,
+            "logits_delata.pth": logits_delta,
             "embs.pth": embs,
         }
 

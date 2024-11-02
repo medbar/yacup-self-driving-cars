@@ -30,7 +30,6 @@ core.default_format = core.default_format.replace(
             lambda name, type_, filename, is_global: type_ == torch.nn.Module,
             lambda v: "torch.nn.Module",
         ),
-
     ]
 )
 global_print_exc()

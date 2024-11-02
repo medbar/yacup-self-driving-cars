@@ -30,8 +30,11 @@ class Transformer(nn.Module):
         nhead=4,
         residual_w=0.2,
         max_len=3000,  # 20s, frame every 20mc
+        loc_round=2,
+        quant_after=240
     ):
         super().__init__()
+        self.loc_round = loc_round
         self.loc_dim = loc_dim
         self.control_dim = control_dim
         self.emb_dim = emb_dim
@@ -42,13 +45,14 @@ class Transformer(nn.Module):
         self.cnn_kernel = cnn_kernel
         self.padding = cnn_kernel // 2
         self.residual_w = residual_w
+        self.quant_after = quant_after
         self.loc_proj = nn.Sequential(
             nn.Linear(loc_dim * cnn_kernel, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim // 2),
-            nn.SiLU()
+            nn.SiLU(),
         )
         self.control_proj = nn.Sequential(
             nn.Linear(control_dim * cnn_kernel, emb_dim),
@@ -56,8 +60,7 @@ class Transformer(nn.Module):
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim // 2),
-            nn.SiLU()
-
+            nn.SiLU(),
         )
         self.pos_emb = nn.Embedding(max_len // cnn_kernel + 1, emb_dim)
         transformer_layer = nn.TransformerEncoderLayer(
@@ -74,8 +77,12 @@ class Transformer(nn.Module):
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
-            nn.Linear(emb_dim, out_dim * cnn_kernel)
+            nn.Linear(emb_dim, out_dim * cnn_kernel),
         )
+
+    def quant_loc(self, loc):
+        # simple round
+        return torch.cat([loc[:, :self.quant_after], loc[:, self.quant_after:].round(decimals=self.loc_round)], dim=1)
 
     def forward(self, loc, control_feats, attention_mask=None):
         # inputs_embeds = torch.concatenate([loc, control_feats], dim=-1)
@@ -100,9 +107,16 @@ class Transformer(nn.Module):
         control_feats = torch.nn.functional.pad(
             control_feats, (0, 0, pad_left, control_right_pad), value=0
         )[:, : loc.shape[1] + self.cnn_kernel]
+        loc = loc.view(B, -1, self.cnn_kernel, F)
+        # последняя точка каждого фрейма - это точка отсчета для следующего фрейма
+        anchor_locs = loc[:, :, -1:, :]
+        loc = torch.cat([loc.new_zeros((B, 1, self.cnn_kernel, F)), loc[:, 1:] - anchor_locs[:, :-1]], dim=1)
+        loc = self.quant_loc(loc * attention_mask.view(B, -1, self.cnn_kernel, 1))
 
         loc_embs = self.loc_proj(loc.view(B, -1, F * self.cnn_kernel))
-        control_embs = self.control_proj(control_feats.view(B, -1, control_feats.shape[-1] * self.cnn_kernel))
+        control_embs = self.control_proj(
+            control_feats.view(B, -1, control_feats.shape[-1] * self.cnn_kernel)
+        )
         embs = torch.concatenate(
             [(loc_embs + control_embs[:, :-1]), control_embs[:, 1:]], dim=2
         )
@@ -118,7 +132,9 @@ class Transformer(nn.Module):
             is_causal=True,
         )
         embs = embs * self.residual_w + embs_after_t
-        logits = self.head(embs).view(B, -1, self.out_dim)[:, pad_left:, :]
+        logits_delta = self.head(embs).view(B, -1, self.cnn_kernel, self.out_dim)
+        logits = logits_delta  + anchor_locs
+        logits = logits.view(B, -1, self.out_dim)[:, pad_left:, :]
         assert logits.shape == (
             B,
             T,
@@ -126,6 +142,7 @@ class Transformer(nn.Module):
         ), f"{logits.shape=}, {B=}, {T=}, {sT=}, {self.out_dim=}"
         return {
             "logits.pth": logits,
+            "logits_delata.pth": logits_delta,
             "embs.pth": embs,
         }
 
