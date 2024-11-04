@@ -23,11 +23,10 @@ class Transformer(nn.Module):
         # cnn_stride=3,
         cnn_kernel=5,
         emb_dim=256,
+        proj_size=0,
         out_dim=6,
         dropout=0.1,
         num_layers=4,
-        nhead=4,
-        max_len=3000,  # 20s, frame every 20mc
     ):
         super().__init__()
         self.loc_dim = loc_dim
@@ -38,23 +37,17 @@ class Transformer(nn.Module):
         self.num_layers = num_layers
         self.cnn_kernel = cnn_kernel
         self.padding = cnn_kernel // 2
-        self.loc_proj = nn.Sequential(
-            nn.Linear(loc_dim, emb_dim),
-            nn.SiLU(),
-        )
-        self.control_proj = nn.Sequential(
-            nn.Linear(control_dim * cnn_kernel, emb_dim),
-            nn.SiLU(),
-        )
-        self.trans_proj = nn.Sequential(nn.Linear(2*emb_dim, emb_dim),
+        self.trans_proj = nn.Sequential(
+            nn.Linear(loc_dim * cnn_kernel + control_dim * cnn_kernel * 2, emb_dim),
             nn.SiLU(),
         )
         self.encoder = nn.LSTM(
-            emb_dim,
-            emb_dim,
-            num_layers,
+            input_size=emb_dim,
+            hidden_size=emb_dim,
+            num_layers=num_layers,
             batch_first=True,
-            proj_size=128
+            dropout=dropout,
+            proj_size=proj_size,
         )
         self.head = nn.Sequential(
             nn.Linear(emb_dim, out_dim * cnn_kernel),
@@ -82,16 +75,13 @@ class Transformer(nn.Module):
             )
         control_feats = torch.nn.functional.pad(
             control_feats, (0, 0, pad_left, control_right_pad), value=0
-        )[:, : loc.shape[1] + self.cnn_kernel]
-        loc = loc.view(B, -1, self.cnn_kernel, F)
-        # усредненная точка каждого фрейма - это точка отсчета для следующего фрейма
-        anchor_locs = loc.mean(dim=2)
-        loc_embs = self.loc_proj(anchor_locs)
-        control_embs = self.control_proj(
-            control_feats.view(B, -1, control_feats.shape[-1] * self.cnn_kernel)
-        )
+        ).view(B, -1, self.control_dim * self.cnn_kernel)
+        anchor_loc = loc.view(B, -1, self.cnn_kernel * F)  # .mean(dim=2)
+        # assert (
+        #    anchor_loc.shape[1] == control_feats.shape[1] - 1
+        # ), f"{anchor_loc.shape[1]=}, {control_feats.shape[1]=}"
         embs = torch.concatenate(
-            [(loc_embs + control_embs[:, :-1]), control_embs[:, 1:]], dim=2
+            [anchor_loc, control_feats[:, :-1], control_feats[:, 1:]], dim=-1
         )
         embs = self.trans_proj(embs)
         sT = embs.shape[1]
@@ -99,20 +89,16 @@ class Transformer(nn.Module):
         embs, h = self.encoder(
             embs,
         )
-        #embs = embs * self.residual_w + embs_after_t
-        logits_delta = self.head(embs).view(B, -1, self.cnn_kernel, self.out_dim)
-        logits = logits_delta + anchor_locs[:, :, None, :]
-        logits = logits.view(B, -1, self.out_dim)[:, pad_left:, :]
+        # embs = embs * self.residual_w + embs_after_t
+        logits = self.head(embs).view(B, -1, self.cnn_kernel, self.out_dim)
+        logits = logits.view(B, loc.shape[1], self.out_dim)
+        logits = logits[:, pad_left:, :]
         assert logits.shape == (
             B,
             T,
             self.out_dim,
         ), f"{logits.shape=}, {B=}, {T=}, {sT=}, {self.out_dim=}"
-        return {
-            "logits.pth": logits,
-            "logits_delata.pth": logits_delta,
-            "embs.pth": embs,
-        }
+        return {"logits.pth": logits, "embs.pth": embs, "h.pth": h}
 
     def step(self):
         """return autoregress step"""

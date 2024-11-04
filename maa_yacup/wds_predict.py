@@ -61,7 +61,7 @@ def _predict(dl, module, device="cpu", limit=-1, start_frame="auto", end_frame=1
             }
         )
         batch["predicted.pth"] = out["loc.pth"][:, :end_frame].cpu()
-        batch["predicted.pth"][mask] = orig_loc[mask]
+        #batch["predicted.pth"][mask] = orig_loc[mask]
         if aprox_yaw:
             x = batch["predicted.pth"][:, :, 0]
             y = batch["predicted.pth"][:, :, 1]
@@ -81,3 +81,49 @@ def _predict(dl, module, device="cpu", limit=-1, start_frame="auto", end_frame=1
 
 
 predict = pipelinefilter(_predict)
+
+
+
+@torch.no_grad()
+@torch.inference_mode()
+def _predict_aed(dl, module, device="cpu", limit=-1, start_frame=245, end_frame=1000, aprox_yaw=True):
+    module = module.to(device).eval()
+    pbar = tqdm(dl)
+    #pbar=dl
+    criterion = torch.nn.MSELoss()
+    for batch_idx, batch in enumerate(pbar):
+        orig_loc = batch["loc.pth"][:, :end_frame]
+        mask = orig_loc != module.pad_value
+        start_loc = orig_loc[:, :start_frame, :]
+        assert start_loc.shape[1] == start_frame, f"{orig_loc.shape=}"
+        assert (
+            start_loc[:, -1] != module.pad_value
+        ).all(), f"{start_frame=}, {batch['__key__']=}, {start_loc[:, -1]=}"
+        control_feats = batch["control_feats.pth"][:, :end_frame]
+        out = module.predict_step(
+            {
+                "loc_encoder.pth": start_loc.to(device),
+                "control_feats.pth": control_feats.to(device),
+            }
+        )
+        batch["predicted.pth"] = out["loc.pth"][:, :end_frame].cpu()
+        #batch["predicted.pth"][mask] = orig_loc[mask]
+        if aprox_yaw:
+            x = batch["predicted.pth"][:, :, 0]
+            y = batch["predicted.pth"][:, :, 1]
+            y2 = y[:, 2:] - y[:, :-2]
+            x2 = x[:, 2:] - x[:, :-2]
+            angle2_mod = torch.atan2(y2, x2)
+            pred_yaw = torch.cat(
+                    [angle2_mod[:, :1], angle2_mod, angle2_mod[:, -1:]], axis=1
+            )
+            batch["predicted.pth"] = torch.stack([x, y, pred_yaw], dim=2)
+        # batch['gen_loss.pth'] = out["loss.pth"].cpu()
+        #logging.info(f"{batch_idx=}, {batch['__key__']=}")
+        yield batch
+        if batch_idx == limit:
+            logging.info(f"Stopping. {limit=}")
+            break
+
+
+predict_aed = pipelinefilter(_predict_aed)

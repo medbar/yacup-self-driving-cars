@@ -40,7 +40,7 @@ model:
     emb_dim: 512
     out_dim: 3
     dropout: 0.2
-    num_layers: 8
+    num_layers: 2
 pl_module:
   module: maa_yacup.module_valpred/CoordsPredictorAR
   imports:
@@ -49,7 +49,7 @@ pl_module:
     debug_dir: ${exp_dir}/examples
     DEBUG: false
     pad_value: -1000000
-    max_weight: 100000
+    max_weight: 10000
     subzero: True
 parameters:
   module: plugins.model/parameters
@@ -119,7 +119,7 @@ dl_train_elements_shuffle:
 dl_train_batching:
   module: maa_yacup.data.wds_batching/batching_constant_batch_size
   options:
-    batch_size: 256
+    batch_size: 64
     collate_fn_kwargs:
       pad_value: -1000000
 dl_train_batch_shuffle:
@@ -128,11 +128,6 @@ dl_train_batch_shuffle:
     bufsize: 20
     initial: 10
     seed: 42
-dl_train_limit:
-  module: maa_yacup.data.wds_filters/limit_total_steps
-  options:
-    thread_limit: 15210
-    num_threads: 8
 dl_train_dataloader:
   module: maa_yacup.data.wds_dataloaders/build_dataloder
   imports:

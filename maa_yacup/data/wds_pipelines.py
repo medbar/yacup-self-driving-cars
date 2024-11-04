@@ -10,7 +10,15 @@ from webdataset.shardlists import expand_urls
 import random
 import time
 
+from glob import glob
+
 from torch.utils.data import DataLoader, IterableDataset
+
+def make_tar_list(dirs, tar_pattern='dump*.tar'):
+    tars = []
+    for d in dirs:
+        tars.extend(glob(f"{d}/{tar_pattern}"))
+    return tars
 
 
 def run(pipeline: Union[List[Any], wds.DataPipeline], limit=-1):

@@ -13,6 +13,8 @@ from webdataset.filters import pipelinefilter
 from pathlib import Path
 from typing import Union, List
 
+from scipy.ndimage import median_filter
+
 
 def _filter_keys(data, keep):
     """
@@ -86,8 +88,13 @@ def _chunking(data, chunk_len=1001, shift=250, T_is_last=True, pad_value=None):
                 "__key__": e["__key__"] + f"__{i}__{end}",
                 "loc.pth": loc[:, i:end],
                 "control_feats.pth": e["control_feats.pth"][:, i:end],
+                **{
+                    k: v
+                    for k, v in e.items()
+                    if k not in ("__key__", "loc.pth", "control_feats.pth")
+                },
             }
-            for k in ['x.pth', 'y.pth', 'yaw.pth']:
+            for k in ["x.pth", "y.pth", "yaw.pth"]:
                 if k in e:
                     chunk[k] = e[k][..., i:end]
             yield chunk
@@ -123,23 +130,37 @@ write_as_sharded_wds = pipelinefilter(_write_as_sharded_wds)
 
 def _save_submit(data, outd=None, loc_key="predicted.pth", frame_step=20000000):
     fname = str(time.strftime("%Y-%m-%d-%H:%M:%S.txt", time.gmtime()))
+    os.makedirs(outd, exist_ok=True)
     outf = f"{outd}/{fname}"
     with open(outf + ".csv", "w") as f:
         f.write("testcase_id,stamp_ns,x,y,yaw\n")
         df = []
         for e in data:
-            req = e["req_stamps.pth"]
             loc = e[loc_key]
+            if "req_stamps.pth" in e:
+                req = e["req_stamps.pth"]
+            else:
+                logging.info("Using loc as req_stamps")
+                req = torch.arange(loc.shape[0], dtype=int) * frame_step
             for t in req:
                 t = int(t.item())
                 left_frame_id = t // frame_step
                 right_frame_id = left_frame_id + 1
                 delta = t - left_frame_id * frame_step
-                bounds = loc[left_frame_id : right_frame_id + 1]
+                if right_frame_id < loc.shape[0]:
+                    bounds = loc[left_frame_id : right_frame_id + 1]
+                else:
+                    logging.warning(
+                        f"{loc.shape=}, {left_frame_id=}, {right_frame_id=}"
+                    )
+                    bounds = torch.cat([loc[-1:], loc[-1:]], dim=0)
                 db = bounds[1] - bounds[0]
                 ddot = db * delta / frame_step
                 dot = bounds[0] + ddot
-                id = int(e["__key__"].replace("YaCupTest__", ""))
+                try:
+                    id = int(e["__key__"].replace("YaCupTest__", ""))
+                except:
+                    id = e["__key__"]
                 df.append(
                     {
                         "testcase_id": id,
@@ -160,18 +181,19 @@ save_submit = pipelinefilter(_save_submit)
 
 def _prepare_input_feats_v1(data):
     for e in data:
-        al = e.pop("acceleration_level.pth")
-        s = e.pop("steering.pth")
-        T = al.shape[0]
-        # 4 X T
-        e["control_feats.pth"] = torch.stack(
-            [
-                al,
-                s,
-                torch.full((T,), e["vehicle_model.id"]),
-                torch.full((T,), e["vehicle_model_modification.id"]),
-            ]
-        )
+        if "control_feats.pth" not in e:
+            al = e.pop("acceleration_level.pth")
+            s = e.pop("steering.pth")
+            T = al.shape[0]
+            # 4 X T
+            e["control_feats.pth"] = torch.stack(
+                [
+                    al,
+                    s,
+                    torch.full((T,), e["vehicle_model.id"]),
+                    torch.full((T,), e["vehicle_model_modification.id"]),
+                ]
+            )
         x = e.pop("x.pth")
         y = e.pop("y.pth")
         z = e.pop("z.pth")
@@ -187,19 +209,20 @@ prepare_input_feats_v1 = pipelinefilter(_prepare_input_feats_v1)
 
 def _prepare_input_feats_v2(data):
     for e in data:
-        al = e.pop("acceleration_level.pth")
-        s = e.pop("steering.pth")
+        if "control_feats.pth" not in e:
+            al = e.pop("acceleration_level.pth")
+            s = e.pop("steering.pth")
 
-        T = al.shape[0]
-        # 4 X T
-        e["control_feats.pth"] = torch.stack(
-            [
-                al,
-                s,
-                torch.full((T,), e['vehicle_model.id']),
-                torch.full((T,), e['vehicle_model_modification.id'])
-            ]
-        )
+            T = al.shape[0]
+            # 4 X T
+            e["control_feats.pth"] = torch.stack(
+                [
+                    al,
+                    s,
+                    torch.full((T,), e["vehicle_model.id"]),
+                    torch.full((T,), e["vehicle_model_modification.id"]),
+                ]
+            )
         x = e["x.pth"]
         y = e["y.pth"]
         v_x = e.pop("v_x.pth")
@@ -207,7 +230,8 @@ def _prepare_input_feats_v2(data):
         mod_v = e.pop("mod_v.pth")
         v_direct = e.pop("v_direct.pth")
         yaw = e["yaw.pth"]
-        e["loc.pth"] = torch.stack([x, y, v_x, v_y, mod_v, v_direct, yaw])
+        if "loc.pth" not in e:
+            e["loc.pth"] = torch.stack([x, y, v_x, v_y, mod_v, v_direct, yaw])
         # remove unused loc
         z = e.pop("z.pth")
         roll = e.pop("roll.pth")
@@ -218,3 +242,44 @@ def _prepare_input_feats_v2(data):
 
 
 prepare_input_feats_v2 = pipelinefilter(_prepare_input_feats_v2)
+
+
+def _continue_control_up_to(data, maxT, pad_value=None):
+    for e in data:
+        c = e["control_feats.pth"]
+        assert len(c.shape) == 2, f"{c.shape=}"
+        F, T = c.shape
+        assert F < T, f"{c.shape=}"
+        if pad_value is not None:
+            last_no_pad_id = 0
+            for i in range(T):
+                if (c[:, i] == pad_value).any():
+                    continue
+                last_no_pad_id = i
+            c = c[:, : last_no_pad_id + 1]
+        diff = maxT - c.shape[1]
+        if diff <= 0:
+            yield e
+        # logging.info(f"{e['control_feats.pth'].shape=}, {c.shape=}, {last_no_pad_id=}, {e['control_feats.pth'][:, last_no_pad_id:]=}, {diff=}")
+        # pad last dim
+        c = torch.nn.functional.pad(c, (0, diff), mode="replicate")
+        assert c.shape == (F, maxT), f"{e['control_feats.pth'].shape=}"
+        e = {**e}
+        e["control_feats.pth"] = c
+        yield e
+
+
+continue_control_up_to = pipelinefilter(_continue_control_up_to)
+
+
+def _medianfilter_preds(data, pred_key="predicted.pth", column_id=-1, size=50):
+    for e in data:
+        frame = e[pred_key]
+        c = frame[..., column_id]
+        filtered_column = median_filter(c.numpy(), size=size, mode="nearest")
+        frame[..., column_id] = torch.from_numpy(filtered_column)
+        e[pred_key] = frame
+        yield e
+
+
+medianfilter_preds = pipelinefilter(_medianfilter_preds)

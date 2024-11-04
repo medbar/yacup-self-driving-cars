@@ -51,7 +51,8 @@ def _measure_score(
     hyp = []
     for e in data:
         mask = (e["loc.pth"] != pad_value).all(dim=-1)
-        pred = e[predicted_key][mask].cpu().numpy()
+        pred = e[predicted_key][:e['loc.pth'].shape[0]]
+        pred = pred[mask].cpu().numpy()
         source = (
             torch.stack(
                 [e[ref_x_key][mask], e[ref_y_key][mask], e[ref_yaw_key][mask]], dim=-1
