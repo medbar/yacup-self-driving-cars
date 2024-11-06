@@ -22,7 +22,6 @@ pip install lightning
 pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu118
 # conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
 pip install git+https://github.com/medbar/webdataset.git
-pip install git+https://nid-gitlab.ad.speechpro.com/asr2/inex.git
 
 
 pip install -U inex-launcher
