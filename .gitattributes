@@ -1,0 +1,8 @@
+exp/local_v2/train_lstm_like5_3.3_alldata_l1/epoch=1-step=13132.ckpt filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_lstm_like5_3.3_alldata_l1/epoch=7-step=52528.ckpt filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_lstm_like5_3.3_alldata_l1/last.ckpt filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_aed_6_4_alldata_l1/epoch=0-step=6566.ckpt filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_aed_6_4_alldata_l1/epoch=1-step=13132.ckpt filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_aed_6_4_alldata_l1/last.ckpt filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_aed_6_4_alldata_l1/submit/2024-11-04-20:37:52.txt.sorted.csv.gz filter=lfs diff=lfs merge=lfs -text
+exp/local_v2/train_lstm_like5_3.3_alldata_l1/submits/2024-11-04-20:22:09.txt.sorted.csv.gz filter=lfs diff=lfs merge=lfs -text

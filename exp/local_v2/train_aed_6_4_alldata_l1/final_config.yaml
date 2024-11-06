@@ -1,0 +1,322 @@
+total_steps: 10000
+exp_dir: exp/local_v2/train_aed_6_4_alldata_l1
+plugins:
+- model
+- criterion
+- pl_module
+- _inplace_load
+- parameters
+- optimizer
+- scheduler
+- _set_optims
+- dl_split_by_worker
+- dl_tar_to_samples
+- dl_prepare_feats
+- dl_decode
+- dl_filter
+- dl_select_loc
+- dl_chunking
+- train_tars_list
+- dl_train_tars
+- dl_train_elements_shuffle
+- dl_train_batching
+- dl_train_batch_shuffle
+- dl_train_dataloader
+- val_tars_list
+- dl_val_tars
+- dl_val_batching
+- dl_val_dataloader
+- checkpoint
+- progress
+- summary
+- lrmonitor
+- trainer
+model:
+  module: maa_yacup.models.transformer_aed_v5/Transformer
+  exports:
+  - parameters
+  options:
+    loc_dim: 2
+    control_dim: 4
+    emb_dim: 1024
+    dropout: 0.1
+    num_encoder_layers: 3
+    num_decoder_layers: 6
+    nhead: 32
+    max_decoder_len: 770
+    cnn_kernel: 20
+criterion:
+  module: torch.nn/L1Loss
+pl_module:
+  module: maa_yacup.module_aed/CoordsPredictorAR
+  imports:
+    model: plugins.model
+    criterion: plugins.criterion
+  options:
+    debug_dir: exp/local_v2/train_aed_6_4_alldata_l1/examples
+    DEBUG: false
+    pad_value: -1000000
+    prefix_len: 245
+  depends:
+  - model
+  - criterion
+_inplace_load:
+  module: plugins.pl_module/inplace_load_from_checkpoint
+  options:
+    ckpt_path: exp/local_v2/train_aed_6/last.ckpt
+  depends:
+  - pl_module
+  - model
+  - criterion
+parameters:
+  module: plugins.model/parameters
+  depends:
+  - model
+optimizer:
+  module: torch.optim/Adam
+  imports:
+    params: plugins.parameters
+  options:
+    lr: 0.0001
+    weight_decay: 1.0e-06
+  depends:
+  - parameters
+  - model
+scheduler:
+  module: torch.optim.lr_scheduler/OneCycleLR
+  imports:
+    optimizer: plugins.optimizer
+  options:
+    max_lr: 0.0001
+    total_steps: 10000
+  depends:
+  - optimizer
+  - parameters
+  - model
+_set_optims:
+  module: plugins.pl_module/set_optimizers_config
+  imports:
+    optimizers_config:
+    - - plugins.optimizer
+    - - plugins.scheduler
+  depends:
+  - optimizer
+  - scheduler
+  - parameters
+  - criterion
+  - pl_module
+  - model
+dl_split_by_worker:
+  module: inex.helpers/attribute
+  options:
+    modname: webdataset
+    attname: split_by_worker
+dl_tar_to_samples:
+  module: webdataset/tarfile_to_samples
+dl_decode:
+  module: webdataset/decode
+dl_prepare_feats:
+  module: maa_yacup.data.wds_filters/prepare_input_feats_v2
+dl_filter:
+  module: maa_yacup.data.wds_filters/filter_keys
+  options:
+    keep:
+    - control_feats.pth
+    - loc.pth
+dl_select_loc:
+  module: maa_yacup.data.wds_filters/select_loc_columns
+  options:
+    columns:
+    - 0
+    - 1
+dl_chunking:
+  module: maa_yacup.data.wds_filters/chunking
+  options:
+    chunk_len: 1010
+    shift: 115
+train_tars_list:
+  module: maa_yacup.data.wds_pipelines/make_tar_list
+  options:
+    dirs:
+    - exp_v2/YandexCup2024v2/YaCupTrain/
+    - exp_v2/YandexCup2024v2/val/
+dl_train_tars:
+  module: webdataset/SimpleShardList
+  imports:
+    urls: plugins.train_tars_list
+  depends:
+  - train_tars_list
+dl_train_elements_shuffle:
+  module: webdataset/shuffle
+  bufsize: 200
+  initial: 80
+  seed: 42
+dl_train_batching:
+  module: maa_yacup.data.wds_batching/batching_constant_batch_size
+  options:
+    batch_size: 128
+    collate_fn_kwargs:
+      pad_value: -1000000
+dl_train_batch_shuffle:
+  module: webdataset/shuffle
+  options:
+    bufsize: 20
+    initial: 10
+    seed: 42
+dl_train_dataloader:
+  module: maa_yacup.data.wds_dataloaders/build_dataloder
+  imports:
+    datapipeline:
+    - plugins.dl_train_tars
+    - plugins.dl_split_by_worker
+    - plugins.dl_tar_to_samples
+    - plugins.dl_decode
+    - plugins.dl_prepare_feats
+    - plugins.dl_filter
+    - plugins.dl_select_loc
+    - plugins.dl_chunking
+    - plugins.dl_train_elements_shuffle
+    - plugins.dl_train_batching
+    - plugins.dl_train_batch_shuffle
+  options:
+    num_workers: 8
+    pin_memory: true
+    batch_size: null
+    sampler: null
+  depends:
+  - dl_split_by_worker
+  - dl_train_tars
+  - dl_tar_to_samples
+  - dl_select_loc
+  - dl_train_batching
+  - train_tars_list
+  - dl_decode
+  - dl_chunking
+  - dl_train_batch_shuffle
+  - dl_filter
+  - dl_train_elements_shuffle
+  - dl_prepare_feats
+val_tars_list:
+  module: glob/glob
+  options:
+    pathname: exp_v2/YandexCup2024v2/val/dump-*.tar
+dl_val_tars:
+  module: webdataset/SimpleShardList
+  imports:
+    urls: plugins.val_tars_list
+  depends:
+  - val_tars_list
+dl_val_batching:
+  module: maa_yacup.data.wds_batching/batching_constant_batch_size
+  options:
+    batch_size: 64
+    collate_fn_kwargs:
+      pad_value: -1000000
+dl_val_dataloader:
+  module: maa_yacup.data.wds_dataloaders/build_dataloder
+  imports:
+    datapipeline:
+    - plugins.dl_val_tars
+    - plugins.dl_split_by_worker
+    - plugins.dl_tar_to_samples
+    - plugins.dl_decode
+    - plugins.dl_prepare_feats
+    - plugins.dl_filter
+    - plugins.dl_select_loc
+    - plugins.dl_chunking
+    - plugins.dl_val_batching
+  options:
+    num_workers: 6
+    pin_memory: true
+    batch_size: null
+    sampler: null
+  depends:
+  - dl_split_by_worker
+  - dl_tar_to_samples
+  - dl_select_loc
+  - dl_decode
+  - dl_val_tars
+  - dl_chunking
+  - dl_filter
+  - dl_prepare_feats
+  - val_tars_list
+  - dl_val_batching
+checkpoint:
+  module: pytorch_lightning.callbacks/ModelCheckpoint
+  options:
+    dirpath: exp/local_v2/train_aed_6_4_alldata_l1
+    monitor: val_loss
+    auto_insert_metric_name: true
+    save_top_k: 2
+    save_last: true
+    verbose: true
+progress:
+  module: pytorch_lightning.callbacks.progress/TQDMProgressBar
+  options:
+    refresh_rate: 10
+summary:
+  module: pytorch_lightning.callbacks/ModelSummary
+lrmonitor:
+  module: pytorch_lightning.callbacks/LearningRateMonitor
+  options:
+    logging_interval: step
+trainer:
+  module: pytorch_lightning/Trainer
+  imports:
+    callbacks:
+    - plugins.progress
+    - plugins.summary
+    - plugins.checkpoint
+    - plugins.lrmonitor
+  options:
+    accelerator: gpu
+    default_root_dir: exp/local_v2/train_aed_6_4_alldata_l1
+    check_val_every_n_epoch: 1
+    max_epochs: 6
+    deterministic: false
+    use_distributed_sampler: false
+  exports:
+  - fit
+  depends:
+  - progress
+  - lrmonitor
+  - checkpoint
+  - summary
+validation_zero_epoch:
+  module: plugins.trainer/validate
+  imports:
+    model: plugins.pl_module
+    dataloaders: plugins.dl_val_dataloader
+execute:
+  method: plugins.trainer/fit
+  imports:
+    model: plugins.pl_module
+    train_dataloaders: plugins.dl_train_dataloader
+    val_dataloaders: plugins.dl_val_dataloader
+  depends:
+  - dl_split_by_worker
+  - dl_train_tars
+  - progress
+  - dl_train_batch_shuffle
+  - criterion
+  - dl_filter
+  - val_tars_list
+  - dl_val_batching
+  - dl_tar_to_samples
+  - dl_select_loc
+  - lrmonitor
+  - trainer
+  - pl_module
+  - dl_train_batching
+  - checkpoint
+  - summary
+  - model
+  - dl_decode
+  - train_tars_list
+  - dl_val_tars
+  - dl_val_dataloader
+  - dl_chunking
+  - dl_train_dataloader
+  - dl_train_elements_shuffle
+  - dl_prepare_feats
+
